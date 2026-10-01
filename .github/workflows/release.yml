@@ -1,0 +1,172 @@
+name: Release
+
+# Cuts a release of the Swift package:
+#   1. Builds OpenSSLCrypto.xcframework from the source pinned in
+#      scripts/openssl-source.env and smoke-tests it.
+#   2. Signs it (Apple lists OpenSSL among the SDKs that must be signed when
+#      shipped as a binary), zips it and computes the SwiftPM checksum.
+#   3. Stamps Package.swift with the version and checksum in a release commit,
+#      tags that commit, and publishes a GitHub Release with the zip attached.
+#
+# The release commit is reachable only from its tag; nothing is pushed to main.
+# main keeps Package.swift pointing at the local build, so the next release
+# starts from a clean manifest and no bot needs to bypass branch protection.
+#
+# Version: <major>.<minor>.<patch * 100 + rebuild>, from OPENSSL_VERSION and the
+# rebuild input. OpenSSL 3.5.7 builds as 3.5.700; rebuilding the same source
+# (new Xcode, signing change) is 3.5.701. SwiftPM ignores "+build" metadata when
+# ordering versions, which is why the counter lives in the patch number.
+#
+# Trigger manually from the Actions tab, or:
+#   gh workflow run release.yml -f rebuild=0
+#
+# Signing needs, under Settings > Secrets and variables > Actions:
+#   secret   XCFRAMEWORK_SIGNING_CERT_P12_BASE64  base64 of an Apple Distribution .p12
+#   secret   XCFRAMEWORK_SIGNING_CERT_PASSWORD    that .p12's password
+#   variable XCFRAMEWORK_SIGNING_IDENTITY         e.g. "Apple Distribution: <Team> (<TEAMID>)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: "Rebuild number for this OpenSSL version: 0 for its first release, then 1, 2, ..."
+        required: true
+        type: number
+        default: 0
+      sign:
+        description: "Sign the xcframework. Leave on for anything an app will ship."
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        env:
+          REBUILD: ${{ inputs.rebuild }}
+        run: |
+          set -euo pipefail
+          source scripts/openssl-source.env
+          if ! [[ "$REBUILD" =~ ^[0-9]{1,2}$ ]]; then
+            echo "::error::rebuild must be 0-99, got '$REBUILD'"; exit 1
+          fi
+          IFS=. read -r major minor patch <<< "$OPENSSL_VERSION"
+          version="$major.$minor.$((10#$patch * 100 + 10#$REBUILD))"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+            echo "::error::tag v$version already exists; bump the rebuild input"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "openssl=$OPENSSL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version (OpenSSL $OPENSSL_VERSION)"
+
+      - name: Select Xcode
+        if: vars.XCODE_VERSION != ''
+        run: sudo xcode-select --switch "/Applications/Xcode_${{ vars.XCODE_VERSION }}.app"
+
+      - name: Build xcframework
+        run: scripts/build-xcframework.sh
+
+      - name: Smoke test
+        run: scripts/smoke-test.sh
+
+      - name: Sign xcframework
+        if: inputs.sign
+        env:
+          CERT_P12_BASE64: ${{ secrets.XCFRAMEWORK_SIGNING_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.XCFRAMEWORK_SIGNING_CERT_PASSWORD }}
+          IDENTITY: ${{ vars.XCFRAMEWORK_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CERT_P12_BASE64" || -z "$CERT_PASSWORD" || -z "$IDENTITY" ]]; then
+            echo "::error::Signing is not configured (see the header of release.yml). Only run with sign off for a build no app will ship."
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+          security import "$RUNNER_TEMP/signing.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm -f "$RUNNER_TEMP/signing.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" >/dev/null
+          # shellcheck disable=SC2046 # the existing keychain list is meant to word-split
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          codesign --timestamp --sign "$IDENTITY" --keychain "$keychain" build/OpenSSLCrypto.xcframework
+          codesign --verify --strict --verbose build/OpenSSLCrypto.xcframework
+
+      - name: Remove signing keychain
+        if: always() && inputs.sign
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          checksum="$(scripts/package-release.sh)"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Write release notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OPENSSL: ${{ steps.version.outputs.openssl }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+          SIGNED: ${{ inputs.sign && vars.XCFRAMEWORK_SIGNING_IDENTITY || 'Not signed' }}
+        run: |
+          set -euo pipefail
+          {
+            echo "OpenSSL $OPENSSL libcrypto, static, for iOS devices (arm64) and the arm64 iOS Simulator."
+            echo
+            echo '```swift'
+            echo ".package(url: \"https://github.com/Backbone-Labs/openssl-ios.git\", exact: \"$VERSION\")"
+            echo '```'
+            echo
+            echo "- SwiftPM checksum: \`$CHECKSUM\`"
+            echo "- Signed by: $SIGNED"
+            echo
+            echo "Rebuild with the same Xcode and compare the libcrypto.a hashes below to verify this artifact."
+            echo
+            echo '```'
+            cat build/BUILD_INFO.txt
+            echo '```'
+          } > build/RELEASE_NOTES.md
+          cat build/RELEASE_NOTES.md
+
+      - name: Commit, tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          OPENSSL: ${{ steps.version.outputs.openssl }}
+          CHECKSUM: ${{ steps.package.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          scripts/stamp-release.sh "$VERSION" "$CHECKSUM"
+          swift package dump-package >/dev/null
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -m "Release v$VERSION (OpenSSL $OPENSSL)" -- Package.swift
+          git tag -a "v$VERSION" -m "Release v$VERSION (OpenSSL $OPENSSL)"
+          git push origin "refs/tags/v$VERSION"
+
+          # If this fails, the tag exists without its asset and resolves to a 404.
+          # Re-run just this command by hand, or delete the tag before retrying the
+          # workflow (the version check refuses an existing tag).
+          gh release create "v$VERSION" build/OpenSSLCrypto.xcframework.zip \
+            --verify-tag \
+            --title "v$VERSION (OpenSSL $OPENSSL)" \
+            --notes-file build/RELEASE_NOTES.md

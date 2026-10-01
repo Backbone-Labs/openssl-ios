@@ -1,0 +1,5 @@
+# Build output: the xcframework, downloaded source, work trees, DerivedData.
+/build/
+/.build/
+/.swiftpm/
+.DS_Store

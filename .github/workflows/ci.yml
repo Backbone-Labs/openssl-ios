@@ -1,0 +1,45 @@
+name: CI
+
+# Builds the xcframework from the pinned source and runs the smoke test on every
+# PR, so a version bump or script change is proven before anything is released.
+# The built xcframework is uploaded as a workflow artifact for inspection; it is
+# never what consumers get (release.yml rebuilds from scratch).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Optional repo variable, e.g. "26.3". Unset uses the runner's default
+      # Xcode; BUILD_INFO.txt records whichever one ran.
+      - name: Select Xcode
+        if: vars.XCODE_VERSION != ''
+        run: sudo xcode-select --switch "/Applications/Xcode_${{ vars.XCODE_VERSION }}.app"
+
+      - name: Cache OpenSSL source
+        uses: actions/cache@v4
+        with:
+          path: build/downloads
+          key: openssl-source-${{ hashFiles('scripts/openssl-source.env') }}
+
+      - name: Build xcframework
+        run: scripts/build-xcframework.sh
+
+      - name: Smoke test
+        run: scripts/smoke-test.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenSSLCrypto-unsigned
+          path: |
+            build/OpenSSLCrypto.xcframework
+            build/BUILD_INFO.txt
