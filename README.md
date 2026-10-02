@@ -90,7 +90,9 @@ Run the **Release** workflow (`gh workflow run release.yml -f rebuild=0`). It:
 4. stamps `Package.swift` in a release commit,
 5. tags it and publishes the GitHub Release with the zip and build notes.
 
-The header of `.github/workflows/release.yml` lists the signing secrets.
+The signing certificate lives in the `release` environment, which only `main` can
+deploy to. The header of `.github/workflows/release.yml` lists the secrets and
+when to replace them.
 
 **Use an Xcode no newer than the one consuming apps build with.** Objects from a
 newer compiler can fail to link with an older one. Set the repo variable

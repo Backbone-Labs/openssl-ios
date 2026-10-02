@@ -20,10 +20,14 @@ name: Release
 # Trigger manually from the Actions tab, or:
 #   gh workflow run release.yml -f rebuild=0
 #
-# Signing needs, under Settings > Secrets and variables > Actions:
+# Signing reads these from the "release" environment (Settings > Environments),
+# which only main may deploy to. Keeping them out of repository-level secrets
+# means a workflow edited on another branch cannot read the certificate.
 #   secret   XCFRAMEWORK_SIGNING_CERT_P12_BASE64  base64 of an Apple Distribution .p12
 #   secret   XCFRAMEWORK_SIGNING_CERT_PASSWORD    that .p12's password
 #   variable XCFRAMEWORK_SIGNING_IDENTITY         e.g. "Apple Distribution: <Team> (<TEAMID>)"
+# The certificate expires; when fastlane match renews it, export the new one and
+# replace both secrets. A signed release stays valid past expiry (it is timestamped).
 
 on:
   workflow_dispatch:
@@ -49,6 +53,7 @@ concurrency:
 jobs:
   release:
     runs-on: macos-15
+    environment: release
     steps:
       - uses: actions/checkout@v4
         with:
