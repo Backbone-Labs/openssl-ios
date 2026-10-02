@@ -9,8 +9,8 @@ import PackageDescription
 // release tag points at a commit where scripts/stamp-release.sh filled in the two
 // values below, which switches the target to that release's GitHub asset.
 // Depend on a tag, never on a branch.
-let releaseVersion = ""
-let releaseChecksum = ""
+let releaseVersion = "3.5.700"
+let releaseChecksum = "305317d62ce52d411cf96d761220db96d4da92abee0604260e8fdfca01718c98"
 
 let openSSLCrypto: Target = releaseChecksum.isEmpty
     ? .binaryTarget(
