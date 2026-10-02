@@ -1,14 +1,14 @@
 # openssl-ios
 
-OpenSSL's `libcrypto`, built as a static XCFramework for iOS and distributed as a
-Swift package. It is built from upstream source checked against a pinned SHA-256,
+OpenSSL's `libcrypto`, built as a static XCFramework for iOS and tvOS (despite the
+repo's name) and distributed as a Swift package. It is built from upstream source checked against a pinned SHA-256,
 on the OpenSSL 3.5 LTS line.
 
 | | |
 |---|---|
 | OpenSSL | 3.5.7 (`scripts/openssl-source.env`) |
-| Slices | `ios-arm64` (device), `ios-arm64-simulator` |
-| Deployment target | iOS 17.0 |
+| Slices | `ios-arm64`, `ios-arm64-simulator`, `tvos-arm64`, `tvos-arm64-simulator` (tvOS from `v3.5.701`) |
+| Deployment targets | iOS 17.0, tvOS 17.0 |
 | Linkage | static `libcrypto.a`, no `libssl` |
 | License | Apache-2.0 (OpenSSL's, which also covers this repo's scripts) |
 
@@ -16,7 +16,7 @@ on the OpenSSL 3.5 LTS line.
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Backbone-Labs/openssl-ios.git", exact: "3.5.700"),
+    .package(url: "https://github.com/Backbone-Labs/openssl-ios.git", exact: "3.5.701"),
 ],
 targets: [
     .target(
@@ -44,7 +44,7 @@ Tags are `v<major>.<minor>.<patch × 100 + rebuild>`:
 | Tag | Contents |
 |---|---|
 | `v3.5.700` | OpenSSL 3.5.7, first build |
-| `v3.5.701` | the same source rebuilt (new Xcode, signing change, script fix) |
+| `v3.5.701` | the same source rebuilt, adding the tvOS slices; a rebuild like this is also how a new Xcode, signing change or script fix ships |
 | `v3.5.900` | OpenSSL 3.5.9 |
 
 SwiftPM ignores `+build` metadata when it orders versions, so `3.5.7+1` would sort
@@ -65,10 +65,14 @@ a release. Depend on tags; `branch: "main"` will not resolve without a local bui
 ## Building locally
 
 ```sh
-scripts/build-xcframework.sh   # downloads + verifies the source, builds both slices
-scripts/smoke-test.sh          # links both slices, runs test vectors in a simulator,
-                               # builds the package for both platforms
+scripts/build-xcframework.sh   # downloads + verifies the source, builds all four slices
+scripts/smoke-test.sh          # links every slice, runs test vectors in an iPhone and an
+                               # Apple TV simulator, builds the package for all four
 ```
+
+Without a tvOS Simulator runtime installed, run the smoke test with
+`SMOKE_SKIP_TVOS_RUN=1`. It still links the tvOS simulator slice, but only CI then
+runs it, and that run is the one that matters for tvOS (see below).
 
 The build writes `build/BUILD_INFO.txt` with the toolchain, Configure options and
 the SHA-256 of each `libcrypto.a`. The same source and the same Xcode produce a
@@ -113,6 +117,13 @@ Stay on an LTS line (3.5 until April 2030) unless there is a reason to move.
 
 ## Things that look optional but are not
 
+- **The tvOS targets set `bn_ops`.** OpenSSL ships no tvOS targets, so
+  `scripts/openssl-tvos-targets.conf` defines them, mirroring the iOS ones.
+  Without an explicit `bn_ops`, a tvOS target inherits 32-bit bignum limbs,
+  while the ARM64 assembly assumes 64-bit ones. That still builds, but P-256
+  arithmetic, and with it PIN pairing, is wrong at runtime. The smoke test's
+  P-256 checks on the Apple TV simulator are what catch it. Each tvOS slice's
+  `configuration.h` should also be identical to its iOS counterpart's.
 - **No `module.modulemap` in the headers.** Xcode copies every static
   xcframework's `Headers/` into one shared `Build/Products/<config>/include/`.
   A module map there collides with any other xcframework that ships one

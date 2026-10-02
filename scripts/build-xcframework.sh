@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds build/OpenSSLCrypto.xcframework: a static libcrypto for iOS devices
-# (arm64) and the arm64 iOS Simulator, from the OpenSSL release pinned in
+# Builds build/OpenSSLCrypto.xcframework: a static libcrypto for iOS and tvOS
+# devices (arm64) and their arm64 simulators, from the OpenSSL release pinned in
 # scripts/openssl-source.env. The source tarball is checked against the pinned
 # SHA-256 before anything is extracted.
 #
@@ -30,6 +30,18 @@ JOBS="$(sysctl -n hw.ncpu)"
 
 # libcrypto only: the static library has no use for the CLI, tests or man pages.
 CONFIGURE_OPTIONS=(no-shared no-tests no-apps no-docs --prefix=/usr/local --openssldir=/usr/local/ssl)
+TVOS_TARGETS_CONF="$ROOT/scripts/openssl-tvos-targets.conf"
+
+# One row per slice: <library identifier> <OpenSSL target> <deployment-target
+# flag> <deployment target> <LC_BUILD_VERSION platform>. The identifier must be
+# the one -create-xcframework assigns. Platforms: 2 iOS, 7 iOS Simulator,
+# 3 tvOS, 8 tvOS Simulator.
+SLICES=(
+  "ios-arm64            ios64-xcrun               -mios-version-min            $IOS_DEPLOYMENT_TARGET  2"
+  "ios-arm64-simulator  iossimulator-arm64-xcrun  -mios-simulator-version-min  $IOS_DEPLOYMENT_TARGET  7"
+  "tvos-arm64           tvos64-xcrun              -mtvos-version-min           $TVOS_DEPLOYMENT_TARGET 3"
+  "tvos-arm64-simulator tvossimulator-arm64-xcrun -mtvos-simulator-version-min $TVOS_DEPLOYMENT_TARGET 8"
+)
 
 fetch_source() {
   mkdir -p "$DOWNLOADS"
@@ -47,10 +59,14 @@ fetch_source() {
   echo "Verified $TARBALL ($OPENSSL_SHA256)"
 }
 
-# build_slice <library identifier> <OpenSSL target> <deployment-target flag>
+# build_slice <library identifier> <OpenSSL target> <deployment-target flag> <deployment target>
 build_slice() {
-  local id="$1" target="$2" min_flag="$3"
+  local id="$1" target="$2" min_flag="$3" min_version="$4"
   local src="$WORK/$id/src" stage="$WORK/$id/stage"
+  local extra=()
+  # Only the tvOS targets need the extra definitions. The iOS slices keep
+  # exactly the Configure invocation they have always had.
+  [[ "$target" == tvos* ]] && extra=(--config="$TVOS_TARGETS_CONF")
 
   rm -rf "${WORK:?}/$id"
   mkdir -p "$src" "$stage"
@@ -59,23 +75,23 @@ build_slice() {
   echo "Building $id ($target)"
   (
     cd "$src"
-    ./Configure "$target" "${CONFIGURE_OPTIONS[@]}" "$min_flag=$IOS_DEPLOYMENT_TARGET"
+    ./Configure "$target" ${extra[@]+"${extra[@]}"} "${CONFIGURE_OPTIONS[@]}" "$min_flag=$min_version"
     make -j"$JOBS" build_libs >/dev/null
     make install_dev DESTDIR="$stage" >/dev/null
   )
 }
 
-# check_slice <library identifier> <expected LC_BUILD_VERSION platform number>
-# Platform 2 is iOS, 7 is the iOS Simulator. A slice built for the wrong one
-# links fine here and fails much later in the consuming app.
+# check_slice <library identifier> <expected platform> <expected deployment target>
+# A slice built for the wrong platform or OS version links fine here and fails
+# much later in the consuming app.
 check_slice() {
-  local id="$1" want_platform="$2"
+  local id="$1" want_platform="$2" want_minos="$3"
   local lib="$XCFRAMEWORK/$id/libcrypto.a"
   local platforms minos
   platforms="$(otool -l "$lib" | awk '/cmd LC_BUILD_VERSION/{f=1} f&&$1=="platform"{print $2; f=0}' | sort -u | tr '\n' ' ')"
   minos="$(otool -l "$lib" | awk '/cmd LC_BUILD_VERSION/{f=1} f&&$1=="minos"{print $2; f=0}' | sort -u | tr '\n' ' ')"
-  if [[ "$platforms" != "$want_platform " || "$minos" != "$IOS_DEPLOYMENT_TARGET " ]]; then
-    echo "error: $id has platform [$platforms] minos [$minos]; expected [$want_platform] [$IOS_DEPLOYMENT_TARGET]" >&2
+  if [[ "$platforms" != "$want_platform " || "$minos" != "$want_minos " ]]; then
+    echo "error: $id has platform [$platforms] minos [$minos]; expected [$want_platform] [$want_minos]" >&2
     exit 1
   fi
 }
@@ -87,16 +103,15 @@ SOURCE_DATE_EPOCH="$(python3 -c 'import sys,tarfile; print(max(m.mtime for m in 
 export SOURCE_DATE_EPOCH
 export ZERO_AR_DATE=1
 
-build_slice ios-arm64           ios64-xcrun              -mios-version-min
-build_slice ios-arm64-simulator iossimulator-arm64-xcrun -mios-simulator-version-min
+create_args=()
+for row in "${SLICES[@]}"; do
+  read -r id target min_flag min_version _ <<<"$row"
+  build_slice "$id" "$target" "$min_flag" "$min_version"
+  create_args+=(-library "$WORK/$id/stage/usr/local/lib/libcrypto.a" -headers "$WORK/$id/stage/usr/local/include")
+done
 
 rm -rf "$XCFRAMEWORK"
-xcodebuild -create-xcframework \
-  -library "$WORK/ios-arm64/stage/usr/local/lib/libcrypto.a" \
-  -headers "$WORK/ios-arm64/stage/usr/local/include" \
-  -library "$WORK/ios-arm64-simulator/stage/usr/local/lib/libcrypto.a" \
-  -headers "$WORK/ios-arm64-simulator/stage/usr/local/include" \
-  -output "$XCFRAMEWORK" >/dev/null
+xcodebuild -create-xcframework "${create_args[@]}" -output "$XCFRAMEWORK" >/dev/null
 
 # -create-xcframework lists the slices in no fixed order, so two builds with
 # identical libraries can still differ in Info.plist. Sort them.
@@ -110,8 +125,10 @@ with open(path, "wb") as f:
     plistlib.dump(info, f, sort_keys=True)
 EOF
 
-check_slice ios-arm64 2
-check_slice ios-arm64-simulator 7
+for row in "${SLICES[@]}"; do
+  read -r id _ _ min_version platform <<<"$row"
+  check_slice "$id" "$platform" "$min_version"
+done
 
 # Xcode copies every static xcframework's Headers/ into one shared
 # Build/Products/<config>/include/. A module.modulemap there collides with any
@@ -128,14 +145,19 @@ fi
   echo "Source:             $SOURCE_URL"
   echo "Source SHA-256:     $OPENSSL_SHA256"
   echo "Configure options:  ${CONFIGURE_OPTIONS[*]}"
-  echo "Deployment target:  iOS $IOS_DEPLOYMENT_TARGET"
+  echo "                    (tvOS also: --config=scripts/openssl-tvos-targets.conf)"
+  echo "Deployment targets: iOS $IOS_DEPLOYMENT_TARGET, tvOS $TVOS_DEPLOYMENT_TARGET"
   echo "SOURCE_DATE_EPOCH:  $SOURCE_DATE_EPOCH"
   echo "Xcode:              $(xcodebuild -version | tr '\n' ' ' | sed 's/ $//')"
-  echo "iPhoneOS SDK:       $(xcrun --sdk iphoneos --show-sdk-version)"
-  echo "Simulator SDK:      $(xcrun --sdk iphonesimulator --show-sdk-version)"
+  echo "SDKs:               iphoneos $(xcrun --sdk iphoneos --show-sdk-version)," \
+    "iphonesimulator $(xcrun --sdk iphonesimulator --show-sdk-version)," \
+    "appletvos $(xcrun --sdk appletvos --show-sdk-version)," \
+    "appletvsimulator $(xcrun --sdk appletvsimulator --show-sdk-version)"
   echo "libcrypto.a SHA-256:"
-  echo "  ios-arm64:           $(shasum -a 256 "$XCFRAMEWORK/ios-arm64/libcrypto.a" | cut -d' ' -f1)"
-  echo "  ios-arm64-simulator: $(shasum -a 256 "$XCFRAMEWORK/ios-arm64-simulator/libcrypto.a" | cut -d' ' -f1)"
+  for row in "${SLICES[@]}"; do
+    read -r id _ <<<"$row"
+    printf "  %-21s %s\n" "$id:" "$(shasum -a 256 "$XCFRAMEWORK/$id/libcrypto.a" | cut -d' ' -f1)"
+  done
 } > "$BUILD/BUILD_INFO.txt"
 
 echo

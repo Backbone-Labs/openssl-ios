@@ -28,7 +28,7 @@ let openSSLCrypto: Target = releaseChecksum.isEmpty
 // Consumers refer to the package by its URL identity, "openssl-ios".
 let package = Package(
     name: "OpenSSLCrypto",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v17), .tvOS(.v17)],
     products: [
         .library(name: "OpenSSLCrypto", targets: ["OpenSSLCrypto", "OpenSSLCryptoPrivacy"]),
     ],
