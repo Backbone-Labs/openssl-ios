@@ -134,7 +134,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "OpenSSL $OPENSSL libcrypto, static, for iOS devices (arm64) and the arm64 iOS Simulator."
+            echo "OpenSSL $OPENSSL libcrypto, static, for iOS and tvOS devices (arm64) and their arm64 simulators."
             echo
             echo '```swift'
             echo ".package(url: \"https://github.com/Backbone-Labs/openssl-ios.git\", exact: \"$VERSION\")"
